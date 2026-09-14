@@ -250,6 +250,8 @@ export async function prepareCodexAttemptPrompt(context: CodexAttemptContext) {
   const codexModelInputHistoryMessages: typeof historyState.messages = [];
   const buildPromptFromCurrentInputs = async () => {
     const result = await resolveAgentHarnessBeforePromptBuildResult({
+      currentUserMessage: params.prompt,
+      currentUserMessageId: currentUserTurnIdempotencyKey,
       prompt: prependCurrentInboundContext(promptState.promptText, params.currentInboundContext),
       developerInstructions: {
         build: ({ toolsAllow }) => {

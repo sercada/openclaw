@@ -1084,7 +1084,7 @@ describe("active-memory plugin", () => {
     expectPrependContextContains(secondResult, "lemon pepper wings");
   });
 
-  it("retains a timed-out recall while cleanup settles and until the run ends", async () => {
+  it("waits for timeout cleanup before replacing a recall in the same run", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     testing.setMinimumTimeoutMsForTests(1);
     testing.setSetupGraceTimeoutMsForTests(0);
@@ -1123,25 +1123,52 @@ describe("active-memory plugin", () => {
       cleanupGate.resolve();
     }
 
-    await expect(retry).resolves.toBeUndefined();
-    expect(runEmbeddedAgent).toHaveBeenCalledTimes(1);
-    await expect(runPromptBuild(event, context)).resolves.toBeUndefined();
-    expect(runEmbeddedAgent).toHaveBeenCalledTimes(1);
-    await requireHook("agent_end")({}, context);
-    await runPromptBuild(event, context);
+    await expect(retry).resolves.toEqual(
+      expect.objectContaining({ prependContext: expect.stringContaining("lemon pepper wings") }),
+    );
     expect(runEmbeddedAgent).toHaveBeenCalledTimes(2);
   });
 
-  it("evicts a rejected attempt before timeout cleanup starts", async () => {
+  it("evicts a rejected replacement after timeout cleanup settles", async () => {
+    let releaseCleanup: () => void = () => {
+      throw new Error("cleanup gate was not initialized");
+    };
+    const cleanupGate = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const initialResult = { status: "timeout" as const, elapsedMs: 1, summary: null };
     await expect(
-      resolveActiveRecallForRun("run-rejected-start", async () => {
-        throw new Error("start failed");
+      resolveActiveRecallForRun("run-rejected-replacement", async (onTimeoutCleanup) => {
+        onTimeoutCleanup(cleanupGate);
+        return initialResult;
       }),
-    ).rejects.toThrow("start failed");
-    const result = { status: "ok" as const, elapsedMs: 1, summary: "recovered" };
+    ).resolves.toEqual(initialResult);
+
+    let rejectedReplacementStarts = 0;
+    const rejectedReplacement = resolveActiveRecallForRun("run-rejected-replacement", async () => {
+      rejectedReplacementStarts++;
+      throw new Error("retry deadline expired");
+    });
+    releaseCleanup();
+    await expect(rejectedReplacement).rejects.toThrow("retry deadline expired");
+
+    const freshResult = {
+      status: "ok" as const,
+      elapsedMs: 2,
+      rawReply: "recovered",
+      summary: "recovered",
+    };
+    let freshStarts = 0;
     await expect(
-      resolveActiveRecallForRun("run-rejected-start", async () => result),
-    ).resolves.toEqual(result);
+      resolveActiveRecallForRun("run-rejected-replacement", async () => {
+        freshStarts++;
+        return freshResult;
+      }),
+    ).resolves.toEqual(freshResult);
+    expect({ freshStarts, rejectedReplacementStarts }).toEqual({
+      freshStarts: 1,
+      rejectedReplacementStarts: 1,
+    });
   });
 
   it("deduplicates cache-disabled private recall until the run ends", async () => {

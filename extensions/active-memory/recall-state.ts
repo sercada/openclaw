@@ -97,6 +97,15 @@ async function resolveActiveRecallForRun(
   start: (onTimeoutCleanup: (cleanup: Promise<void>) => void) => Promise<ActiveRecallResult>,
 ): Promise<ActiveRecallResult> {
   const existing = activeRecallRuns.get(runId);
+  if (existing?.timeoutCleanup) {
+    // A replacement must not reuse managers while the timed-out recall or its
+    // cleanup is still settling; concurrent callers then join the replacement.
+    await Promise.allSettled([existing.promise, existing.timeoutCleanup]);
+    if (activeRecallRuns.get(runId) === existing) {
+      activeRecallRuns.delete(runId);
+    }
+    return await resolveActiveRecallForRun(runId, start);
+  }
   if (existing) {
     return await existing.promise;
   }
@@ -105,16 +114,18 @@ async function resolveActiveRecallForRun(
     promise: Promise.resolve().then(() =>
       start((cleanup) => {
         entry.timeoutCleanup = cleanup;
-        // Observe resource cleanup without reopening this request's recall budget.
-        // The terminal result remains reusable until agent_end clears the run.
-        void cleanup.catch(() => undefined);
+        void Promise.allSettled([entry.promise, cleanup]).then(() => {
+          if (activeRecallRuns.get(runId) === entry) {
+            activeRecallRuns.delete(runId);
+          }
+        });
       }),
     ),
   };
   activeRecallRuns.set(runId, entry);
   void entry.promise.catch(() => {
     // Failures before timeout cleanup starts must not poison this run;
-    // timeout-backed entries stay registered until agent_end.
+    // timeout-backed entries stay registered until manager cleanup settles.
     if (!entry.timeoutCleanup && activeRecallRuns.get(runId) === entry) {
       activeRecallRuns.delete(runId);
     }
